@@ -1,89 +1,6 @@
-import os
-import re
-import json
 from datetime import date
-from urllib.parse import urlparse
 
-import requests
-import anthropic
-
-
-SCORING_PROMPT = """\
-你是 GEO（Generative Engine Optimization）評分專家。根據以下網頁內容，對網站進行快速評分。
-
-目標網址：{url}
-
-HTML 內容（前 8000 字元）：
-{html}
-
-robots.txt：
-{robots}
-
-請評分以下維度，以 JSON 格式回傳。所有分數必須是整數，不得為空。
-
-評分規則：
-- ai_citability (0-100)：有無 llms.txt、AI crawler 是否被允許、內容是否有清晰可引用的事實
-- content_eeat (0-100)：有無作者資訊、內容深度與原創性、有無引用來源
-- technical (0-100)：HTTPS、meta description、canonical、heading structure
-- schema (0-100)：HTML 中有無 JSON-LD / microdata，schema 類型與完整度
-- chatgpt_score (0-100)：ChatGPT 引用可能性
-- gemini_score (0-100)：Google Gemini 引用可能性
-- google_ai_score (0-100)：Google AI Overviews 適配度
-- perplexity_score (0-100)：Perplexity 引用可能性
-- media_coverage (0-40)：根據你訓練資料中的知識，評估這個品牌在台灣主流媒體（聯合報、中時、自由時報、商業週刊、天下、遠見、數位時代等）的曝光量與報導頻率。媒體記錄豐富給高分，幾乎無台灣媒體報導給低分。不要看頁面上有無提及，而是你自己對這個品牌的認知。
-- content_depth (0-20)：頁面內容是否有深度（長文/研究/數據）
-- social_presence (0-20)：是否有用戶評論、UGC 跡象、真實社群互動。僅有社群帳號連結不算分，需要有實際互動或評論內容。
-- entity_recognition (0-20)：品牌名稱、地址、聯絡資訊、知識圖譜信號
-
-注意：brand_authority 由系統自動計算（= media_coverage + content_depth + social_presence + entity_recognition），請勿回傳此欄位。
-
-另外需要：
-- brand_name：從 URL 或頁面推斷的品牌名稱
-- diagnosis_text：一句話整體診斷（繁體中文，20-40 字）
-- 各維度的 reason：一句評分依據（繁體中文，15-30 字）
-
-只回傳 JSON，不要其他文字：
-{{
-  "brand_name": "...",
-  "diagnosis_text": "...",
-  "ai_citability": <整數>, "ai_citability_reason": "...",
-  "content_eeat": <整數>,  "content_eeat_reason": "...",
-  "technical": <整數>,     "technical_reason": "...",
-  "schema": <整數>,        "schema_reason": "...",
-  "chatgpt_score": <整數>, "gemini_score": <整數>,
-  "google_ai_score": <整數>, "perplexity_score": <整數>,
-  "media_coverage": <整數>, "content_depth": <整數>,
-  "social_presence": <整數>, "entity_recognition": <整數>,
-  "brand_authority_reason": "..."
-}}
-"""
-
-
-def _fetch_page(url: str) -> tuple[str, str]:
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; GEO-Scorer/1.0)"}
-    try:
-        resp = requests.get(url, headers=headers, timeout=15)
-        html = resp.text[:8000]
-    except Exception as exc:
-        html = f"[fetch error: {exc}]"
-
-    parsed = urlparse(url)
-    robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
-    try:
-        robots_resp = requests.get(robots_url, headers=headers, timeout=10)
-        robots = robots_resp.text[:2000]
-    except Exception:
-        robots = "[robots.txt not found]"
-
-    return html, robots
-
-
-def parse_claude_response(raw: str) -> dict:
-    """Extract and parse JSON from Claude's text response."""
-    match = re.search(r"\{.*\}", raw, re.DOTALL)
-    if not match:
-        raise ValueError(f"No JSON found in Claude response: {raw[:200]}")
-    return json.loads(match.group())
+from report_scoring import run_report_audit
 
 
 def build_score_data(url: str, scores: dict) -> dict:
@@ -96,13 +13,13 @@ def build_score_data(url: str, scores: dict) -> dict:
         int(scores["entity_recognition"])
     )
 
-    # geo_score 用正確的 brand_authority 重算
+    # /geo report 官方權重：平台 25、內容 25、技術 20、Schema 15、品牌 15。
     geo_score = round(
         int(scores["ai_citability"]) * 0.25 +
         int(scores["content_eeat"])  * 0.25 +
         int(scores["technical"])     * 0.20 +
-        brand_authority              * 0.20 +
-        int(scores["schema"])        * 0.10
+        int(scores["schema"])        * 0.15 +
+        brand_authority              * 0.15
     )
 
     schema_score = int(scores["schema"])
@@ -145,18 +62,39 @@ def build_score_data(url: str, scores: dict) -> dict:
 
 
 def score_url(url: str) -> dict:
-    """Main entry point: fetch URL, call Claude, return structured scorecard data."""
-    html, robots = _fetch_page(url)
-
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    prompt = SCORING_PROMPT.format(url=url, html=html, robots=robots)
-
-    message = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    raw = message.content[0].text.strip()
-    scores = parse_claude_response(raw)
+    """Fetch real evidence and calculate the installed `/geo report` rubrics."""
+    audit = run_report_audit(url)
+    shared = audit["scores"]
+    reasons = audit["reasons"]
+    platforms = audit["platform_scores"]
+    matrix = audit["brand_matrix"]
+    weakest_key = min(shared, key=shared.get)
+    labels = {
+        "ai_platform": "AI 平台準備度",
+        "content": "內容品質 E-E-A-T",
+        "technical": "技術基礎",
+        "schema": "Schema 結構化資料",
+        "brand": "品牌權威度",
+    }
+    scores = {
+        "brand_name": audit["brand_name"],
+        "diagnosis_text": f"目前主要缺口為{labels[weakest_key]}（{shared[weakest_key]} 分）",
+        "ai_citability": shared["ai_platform"],
+        "ai_citability_reason": reasons["ai_platform"],
+        "content_eeat": shared["content"],
+        "content_eeat_reason": reasons["content"],
+        "technical": shared["technical"],
+        "technical_reason": reasons["technical"],
+        "schema": shared["schema"],
+        "schema_reason": reasons["schema"],
+        "brand_authority_reason": reasons["brand"],
+        "chatgpt_score": platforms["chatgpt"],
+        "gemini_score": platforms["gemini"],
+        "google_ai_score": platforms["google_ai"],
+        "perplexity_score": platforms["perplexity"],
+        "media_coverage": matrix["media"],
+        "content_depth": matrix["content_depth"],
+        "social_presence": matrix["social"],
+        "entity_recognition": matrix["entity"],
+    }
     return build_score_data(url, scores)

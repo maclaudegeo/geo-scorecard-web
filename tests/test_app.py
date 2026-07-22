@@ -85,6 +85,13 @@ class TestRoutes(unittest.TestCase):
                            content_type="application/json")
         self.assertEqual(resp.status_code, 400)
 
+    def test_score_rejects_private_network_url(self):
+        client = self._client(Path(self.tmpdir))
+        resp = client.post("/score",
+                           data=json.dumps({"url": "http://127.0.0.1/admin"}),
+                           content_type="application/json")
+        self.assertEqual(resp.status_code, 400)
+
     def test_score_success_returns_job_id(self):
         tmp = Path(self.tmpdir)
 
@@ -98,6 +105,7 @@ class TestRoutes(unittest.TestCase):
             pass  # stubs already created by fake_generate_scorecard
 
         with patch("app.score_url", side_effect=fake_score_url), \
+             patch("app.validate_public_url", side_effect=lambda url: url), \
              patch("app.generate_scorecard", side_effect=fake_generate_scorecard), \
              patch("app.generate_analysis_card", side_effect=fake_generate_analysis_card):
             client = self._client(tmp)
@@ -137,6 +145,7 @@ class TestRoutes(unittest.TestCase):
             pass
 
         with patch("app.score_url", side_effect=fake_score_url), \
+             patch("app.validate_public_url", side_effect=lambda url: url), \
              patch("app.generate_scorecard", side_effect=fake_generate_scorecard), \
              patch("app.generate_analysis_card", side_effect=fake_generate_analysis_card):
             client = self._client(tmp)
@@ -166,6 +175,7 @@ class TestRoutes(unittest.TestCase):
             pass
 
         with patch("app.score_url", side_effect=fake_score_url), \
+             patch("app.validate_public_url", side_effect=lambda url: url), \
              patch("app.generate_scorecard", side_effect=fake_generate_scorecard), \
              patch("app.generate_analysis_card", side_effect=fake_generate_analysis_card):
             client = self._client(tmp)

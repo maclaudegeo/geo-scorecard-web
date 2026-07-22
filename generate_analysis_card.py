@@ -24,6 +24,7 @@ BORDER      = (50,  50,  50)
 
 def _load_font(size: int):
     candidates = [
+        str(Path(__file__).parent / "NotoSansCJKtc-Regular.otf"),
         "/Library/Fonts/Arial Unicode.ttf",
         "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
         "/System/Library/Fonts/STHeiti Medium.ttc",

@@ -1,6 +1,5 @@
 import os
 import re
-import sys
 import uuid
 import shutil
 from datetime import datetime, timedelta
@@ -8,12 +7,10 @@ from pathlib import Path
 
 from flask import Flask, render_template, request, jsonify, send_file, abort
 
-# Add geo-scorecard generator to path
-SCORECARD_DIR = Path.home() / ".claude/skills/geo-scorecard/scripts"
-sys.path.insert(0, str(SCORECARD_DIR))
 from generate_scorecard import generate_scorecard
 
 from scoring import score_url
+from report_scoring import validate_public_url
 from generate_analysis_card import generate_analysis_card
 
 app = Flask(__name__)
@@ -50,6 +47,10 @@ def score():
         return jsonify({"error": "URL is required"}), 400
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
+    try:
+        url = validate_public_url(url)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
     job_id = uuid.uuid4().hex[:12]
     job_dir = TMP_DIR / job_id

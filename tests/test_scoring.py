@@ -1,14 +1,13 @@
-import json
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 from pathlib import Path
 import sys
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from scoring import build_score_data, parse_claude_response
+from scoring import build_score_data, score_url
 
 
-MOCK_CLAUDE_JSON = {
+MOCK_REPORT_SCORES = {
     "brand_name": "TestBrand",
     "geo_score": 62,
     "diagnosis_text": "技術基礎穩定但 AI 識別度不足",
@@ -33,26 +32,9 @@ MOCK_CLAUDE_JSON = {
 }
 
 
-class TestParseClaudeResponse(unittest.TestCase):
-    def test_parse_valid_json_string(self):
-        raw = json.dumps(MOCK_CLAUDE_JSON)
-        result = parse_claude_response(raw)
-        self.assertEqual(result["brand_name"], "TestBrand")
-        self.assertEqual(result["geo_score"], 62)
-
-    def test_parse_json_with_surrounding_text(self):
-        raw = "Here is the result:\n" + json.dumps(MOCK_CLAUDE_JSON) + "\nDone."
-        result = parse_claude_response(raw)
-        self.assertEqual(result["geo_score"], 62)
-
-    def test_parse_missing_json_raises(self):
-        with self.assertRaises(ValueError):
-            parse_claude_response("No JSON here at all.")
-
-
 class TestBuildScoreData(unittest.TestCase):
     def test_output_structure(self):
-        result = build_score_data("https://example.com", MOCK_CLAUDE_JSON)
+        result = build_score_data("https://example.com", MOCK_REPORT_SCORES)
         self.assertEqual(result["url"], "https://example.com")
         self.assertIn("date", result)
         self.assertEqual(len(result["dimensions"]), 5)
@@ -60,27 +42,79 @@ class TestBuildScoreData(unittest.TestCase):
         self.assertIn("citation_matrix", result)
 
     def test_schema_color_yellow_when_below_40(self):
-        result = build_score_data("https://example.com", MOCK_CLAUDE_JSON)
+        result = build_score_data("https://example.com", MOCK_REPORT_SCORES)
         schema_dim = next(d for d in result["dimensions"] if "Schema" in d["label"])
         self.assertEqual(schema_dim.get("color"), "yellow")
 
     def test_schema_no_color_when_above_40(self):
-        scores = {**MOCK_CLAUDE_JSON, "schema": 55}
+        scores = {**MOCK_REPORT_SCORES, "schema": 55}
         result = build_score_data("https://example.com", scores)
         schema_dim = next(d for d in result["dimensions"] if "Schema" in d["label"])
         self.assertNotIn("color", schema_dim)
 
     def test_dimensions_have_reason(self):
-        result = build_score_data("https://example.com", MOCK_CLAUDE_JSON)
+        result = build_score_data("https://example.com", MOCK_REPORT_SCORES)
         for dim in result["dimensions"]:
             self.assertIn("reason", dim, f"Missing reason in {dim['label']}")
 
     def test_citation_matrix_center_avg_equals_brand_authority(self):
-        result = build_score_data("https://example.com", MOCK_CLAUDE_JSON)
+        result = build_score_data("https://example.com", MOCK_REPORT_SCORES)
         self.assertEqual(
             result["citation_matrix"]["center_avg"],
-            MOCK_CLAUDE_JSON["brand_authority"]
+            MOCK_REPORT_SCORES["brand_authority"]
         )
+
+    def test_geo_score_uses_report_weights(self):
+        result = build_score_data("https://example.com", MOCK_REPORT_SCORES)
+        self.assertEqual(result["geo_score"], 56)
+
+
+class TestScoreUrl(unittest.TestCase):
+    @patch("scoring.run_report_audit")
+    def test_score_url_uses_report_engine_without_claude_totals(self, audit):
+        audit.return_value = {
+            "brand_name": "TestBrand",
+            "scores": {
+                "ai_platform": 61,
+                "content": 52,
+                "technical": 63,
+                "schema": 24,
+                "brand": 31,
+            },
+            "reasons": {
+                "ai_platform": "五平台實測",
+                "content": "E-E-A-T 檢核",
+                "technical": "八類技術檢核",
+                "schema": "Schema 12 項檢核",
+                "brand": "台灣搜尋實測",
+            },
+            "platform_scores": {
+                "chatgpt": 60,
+                "gemini": 55,
+                "google_ai": 58,
+                "perplexity": 45,
+                "bing_copilot": 42,
+            },
+            "brand_matrix": {
+                "media": 12,
+                "content_depth": 6,
+                "social": 4,
+                "entity": 9,
+            },
+            "warnings": [],
+        }
+
+        result = score_url("https://example.com")
+
+        dimensions = {item["label"]: item["score"] for item in result["dimensions"]}
+        self.assertEqual(dimensions, {
+            "AI 平台準備度": 61,
+            "內容品質 E-E-A-T": 52,
+            "技術基礎": 63,
+            "品牌權威度": 31,
+            "Schema 結構化資料": 24,
+        })
+        audit.assert_called_once_with("https://example.com")
 
 
 if __name__ == "__main__":
