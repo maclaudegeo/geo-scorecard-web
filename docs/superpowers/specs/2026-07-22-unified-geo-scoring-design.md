@@ -55,7 +55,7 @@ GEO Score =
 
 一次分析中的五維度結果必須先形成同一份評分快照，再供 Scorecard Web 畫面與圖片共同使用，禁止同一工作重複評分。
 
-若任一必要網站抓取或模型評分失敗，Scorecard Web 必須回報評分失敗，不得用 Claude 猜測值或零分靜默替代。
+網站抓取或模型評分失敗時，Scorecard Web 必須採用 Dashboard 現行相同的 fallback 與失敗平台排除規則，不得另外要求 Claude 產生替代分數。
 
 ## 不修改項目
 
