@@ -1,305 +1,231 @@
-# Independent Unified GEO Scoring Implementation Plan
+# /report Unified GEO Scoring Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make Scorecard Web independently calculate the same five GEO dimensions as GEO Dashboard without calling or reading Dashboard results.
+**Goal:** Make both GEO websites independently calculate the same five `/report` scores, while keeping Dashboard's real AI visibility analysis and adding evidence-based Taiwan brand authority.
 
-**Architecture:** Add self-contained audit and brand-authority modules to Scorecard Web by porting the Dashboard's current production rules exactly. Keep the existing Claude scorecard call for brand identification, diagnosis, reasons, and four estimated platform values, but override all five shared dimension scores and the four brand-matrix values with the independent audit output before calculating the existing Scorecard total.
+**Architecture:** Add the same framework-independent `report_scoring.py` module to both repositories. It builds one evidence snapshot, applies explicit `/report` rubrics, performs Taiwan brand searches, and returns a versioned score payload; each web app only maps that payload into its existing response and output formats.
 
-**Tech Stack:** Python 3, Flask, requests, httpx, Anthropic API, OpenAI API, Gemini API, Firecrawl API, unittest/pytest
+**Tech Stack:** Python 3, Flask/FastAPI, requests, httpx, lxml, pytest, Firecrawl, SerpAPI/byCrawl with Google News RSS fallback
 
 ---
 
-### Task 1: Port the objective Dashboard audit
+## File Map
+
+- `geo-visibility-dashboard/report_scoring.py`: canonical `/report` evidence collection and scoring engine.
+- `geo-visibility-dashboard/tests/test_report_scoring.py`: rubric, parser, fallback, and total-weight tests.
+- `geo-visibility-dashboard/server.py`: replace simplified shared scores with the report engine; preserve real AI visibility.
+- `geo-visibility-dashboard/scorer.py`: use scaled `/report` weights plus AI visibility.
+- `scorecard-web/report_scoring.py`: independently deployable identical scoring engine.
+- `scorecard-web/scoring.py`: map report scores and platform details into existing card data.
+- `scorecard-web/tests/test_report_scoring.py`: same rubric contract tests.
+- `scorecard-web/tests/test_scoring.py`: orchestration and `/report` total tests.
+- `scorecard-web/tests/test_moreson_parity.py`: compare both independent engines on the acceptance URL.
+
+### Task 1: Lock the evidence contract and edge cases
 
 **Files:**
-- Create: `dashboard_audit.py`
-- Create: `tests/test_dashboard_audit.py`
-- Modify: `requirements.txt`
+- Create: `geo-visibility-dashboard/tests/test_report_scoring.py`
+- Create: `scorecard-web/tests/test_report_scoring.py`
 
-- [ ] **Step 1: Write failing parity tests**
+- [ ] **Step 1: Write failing snapshot tests**
 
-Create tests that patch all network boundaries and assert the Dashboard's exact current calculations:
+Cover URL normalization, robots statuses, nested `llms_txt.exists`, JSON-LD lists and `@graph`, case-sensitive valid Schema types, invalid values such as `address: "暫無"`, internal-page selection capped at 10, and network failure represented as `unknown` rather than a guessed pass.
 
 ```python
-from unittest.mock import MagicMock, patch
-
-from dashboard_audit import run_geo_audit
-
-
-@patch("dashboard_audit.requests.head")
-@patch("dashboard_audit._extract_schema_from_html")
-@patch("dashboard_audit._firecrawl_scrape_full")
-@patch("dashboard_audit.fetch_llms_txt")
-@patch("dashboard_audit.fetch_robots_txt")
-def test_run_geo_audit_matches_dashboard_weights(
-    robots, llms, scrape, schema, head
-):
-    robots.return_value = {"exists": True}
-    llms.return_value = {"llms_txt": {"exists": True}}
-    scrape.return_value = {
-        "status_code": 200,
-        "title": "Moreson",
-        "description": "description",
-        "canonical": "https://example.com",
-        "h1_tags": ["Moreson"],
-        "markdown": "x" * 2501,
-        "raw_meta": {"ogTitle": "Moreson"},
-    }
-    schema.return_value = [{"@type": "Organization", "sameAs": []}]
-    head.return_value = MagicMock(headers={
-        "strict-transport-security": "x",
-        "x-content-type-options": "x",
-        "x-frame-options": "x",
-    })
-
-    assert run_geo_audit("https://example.com", "Moreson") == {
-        "ai_platform": 70,
-        "content": 100,
-        "technical": 90,
-        "brand": 0,
-        "schema": 65,
-    }
+def test_schema_evidence_flattens_graph_and_flags_invalid_type_case():
+    evidence = parse_schema_blocks([
+        {"@graph": [
+            {"@type": "localBusiness", "address": "暫無"},
+            {"@type": "WebSite", "potentialAction": {"@type": "SearchAction"}},
+        ]}
+    ])
+    assert evidence.types == ("localBusiness", "WebSite")
+    assert "invalid_type_case:localBusiness" in evidence.issues
+    assert "placeholder_value:address" in evidence.issues
 ```
 
-This deliberately preserves the Dashboard's current `llms.get("exists")` and `robots.get("allows")` behavior so the two independent services stay equal.
+- [ ] **Step 2: Run tests and verify RED**
 
-- [ ] **Step 2: Run the test and verify it fails**
+Run in each repository: `pytest tests/test_report_scoring.py -v`
 
-Run: `pytest tests/test_dashboard_audit.py -v`
+Expected: import fails because `report_scoring` does not exist.
 
-Expected: collection fails with `ModuleNotFoundError: No module named 'dashboard_audit'`.
+- [ ] **Step 3: Implement immutable evidence models and parsers**
 
-- [ ] **Step 3: Implement the independent audit module**
+Create dataclasses for `PageEvidence`, `SchemaEvidence`, `BrandEvidence`, and `ReportSnapshot`. Add pure parsers for robots.txt, llms.txt, HTML metadata, links, headings, JSON-LD, security headers, and timing data. Every unknown field must remain `None`/`unknown`; never convert an exception into a positive score.
 
-Create `dashboard_audit.py` and port the complete implementations of `fetch_robots_txt`, `fetch_llms_txt`, `_firecrawl_scrape_full`, `_extract_schema_from_html`, and `run_geo_audit` exactly from:
+- [ ] **Step 4: Run both parser suites and verify GREEN**
 
-- `../geo-visibility-dashboard/fetch_page.py:196-327`
-- `../geo-visibility-dashboard/server.py:153-200`
-- `../geo-visibility-dashboard/server.py:203-287`
+Run: `pytest tests/test_report_scoring.py -v`
 
-The module reads `FIRECRAWL_API_KEY` from the environment. Preserve Dashboard's empty-metadata fallback when Firecrawl fails and never ask Claude to invent replacement scores.
+Expected: all snapshot/parser tests pass in both repositories.
 
-- [ ] **Step 4: Add runtime dependencies**
-
-Add the dependencies used by the ported Dashboard logic:
-
-```text
-httpx>=0.27
-python-dotenv>=1.0
-```
-
-- [ ] **Step 5: Run the tests**
-
-Run: `pytest tests/test_dashboard_audit.py -v`
-
-Expected: all objective audit parity tests pass.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add dashboard_audit.py tests/test_dashboard_audit.py requirements.txt
-git commit -m "feat: port dashboard GEO audit rules"
-```
-
-### Task 2: Port Dashboard brand-authority scoring
+### Task 2: Implement the four website-based `/report` rubrics
 
 **Files:**
-- Create: `brand_authority.py`
-- Create: `tests/test_brand_authority.py`
+- Modify: both `report_scoring.py`
+- Modify: both `tests/test_report_scoring.py`
 
-- [ ] **Step 1: Write failing parser and averaging tests**
+- [ ] **Step 1: Write failing rubric tests**
+
+Use fixed snapshots to assert every category maximum and a sparse Moreson-like case. Tests must verify:
 
 ```python
-from unittest.mock import patch
-
-from brand_authority import _parse_authority_response, score_brand_authority_ai
-
-
-RAW = """媒體報導：20/40
-社群口碑：10/20
-內容深度：12/20
-實體辨識度：14/20
-總分：56/100
-媒體報導問題：報導不足
-媒體報導建議：增加第三方報導"""
-
-
-def test_parse_authority_response_matches_dashboard():
-    parsed = _parse_authority_response(RAW)
-    assert parsed["media"] == 20
-    assert parsed["community"] == 10
-    assert parsed["content"] == 12
-    assert parsed["identity"] == 14
-    assert parsed["total"] == 56
-
-
-@patch("brand_authority._query_claude", return_value=RAW)
-@patch("brand_authority._query_gemini", return_value=RAW)
-@patch("brand_authority._query_chatgpt", return_value=RAW)
-def test_three_platform_average_matches_dashboard(*_):
-    result = score_brand_authority_ai("Moreson")
-    assert result["avg"] == {
-        "media": 20, "community": 10, "content": 12, "identity": 14
-    }
-    assert result["total"] == 56
+assert score_content(snapshot).breakdown.keys() == {
+    "experience", "expertise", "authoritativeness", "trustworthiness",
+}
+assert score_technical(snapshot).maxima == {
+    "crawlability": 15, "indexability": 12, "security": 10,
+    "url_structure": 8, "mobile": 10, "core_web_vitals": 15,
+    "ssr": 15, "page_speed": 15,
+}
+assert score_schema(snapshot).maximum == 100
+assert set(score_platforms(snapshot).platforms) == {
+    "google_ai", "chatgpt", "perplexity", "gemini", "bing_copilot",
+}
 ```
 
-- [ ] **Step 2: Run the tests and verify they fail**
+- [ ] **Step 2: Verify rubric tests fail for missing scorers**
 
-Run: `pytest tests/test_brand_authority.py -v`
+Run: `pytest tests/test_report_scoring.py -v`
 
-Expected: collection fails with `ModuleNotFoundError: No module named 'brand_authority'`.
+- [ ] **Step 3: Implement explicit criterion scoring**
 
-- [ ] **Step 3: Implement exact model parity**
+Implement each table from the installed `/report` source skills. Every awarded point includes `criterion`, `points`, `max_points`, and `evidence`; no function accepts a model-generated total. Platform readiness is the rounded average of five platform scores. Content applies the four 25-point E-E-A-T tables and topical-authority modifier. Technical uses the exact eight maxima. Schema uses the exact 12 criteria and validates type names and required properties.
 
-Port `AUTHORITY_PROMPT`, `_parse_authority_response`, `_query_chatgpt`, `_query_gemini`, `_query_claude`, and `score_brand_authority_ai` from `../geo-visibility-dashboard/geo_audit.py:192-390`. Preserve the exact models (`gpt-4o`, `gemini-2.5-flash`, `claude-haiku-4-5`), ChatGPT temperature `0.3`, parsing expressions, failed-platform exclusion, rounded dimension averages, and rounded total.
+- [ ] **Step 4: Verify all rubric totals and caps**
 
-- [ ] **Step 4: Run the tests**
+Run both test suites and confirm scores remain integers between 0 and 100 and equal the sum of their breakdowns.
 
-Run: `pytest tests/test_brand_authority.py -v`
-
-Expected: all parser and averaging tests pass.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add brand_authority.py tests/test_brand_authority.py
-git commit -m "feat: port dashboard brand authority scoring"
-```
-
-### Task 3: Make Scorecard use authoritative shared-dimension scores
+### Task 3: Implement evidence-based Taiwan brand authority
 
 **Files:**
-- Modify: `scoring.py`
-- Modify: `tests/test_scoring.py`
+- Modify: both `report_scoring.py`
+- Modify: both `tests/test_report_scoring.py`
 
-- [ ] **Step 1: Write a failing orchestration test**
+- [ ] **Step 1: Write failing Taiwan-search tests**
 
-Patch `_fetch_page`, the Anthropic response, `run_geo_audit`, and `score_brand_authority_ai`. Assert that `score_url()` ignores Claude's five dimension guesses and returns the independent Dashboard-equivalent values:
-
-```python
-@patch("scoring.score_brand_authority_ai")
-@patch("scoring.run_geo_audit")
-@patch("scoring.anthropic.Anthropic")
-@patch("scoring._fetch_page", return_value=("<html></html>", ""))
-def test_score_url_uses_dashboard_dimensions(fetch, anthropic_client, audit, authority):
-    anthropic_client.return_value.messages.create.return_value.content[0].text = json.dumps(MOCK_CLAUDE_JSON)
-    audit.return_value = {
-        "ai_platform": 70, "content": 80, "technical": 75,
-        "brand": 0, "schema": 55,
-    }
-    authority.return_value = {
-        "total": 56,
-        "avg": {"media": 20, "content": 12, "community": 10, "identity": 14},
-        "platforms": {},
-    }
-
-    result = score_url("https://example.com")
-    dimensions = {item["label"]: item["score"] for item in result["dimensions"]}
-    assert dimensions == {
-        "AI 平台準備度": 70,
-        "內容品質 E-E-A-T": 80,
-        "技術基礎": 75,
-        "品牌權威度": 56,
-        "Schema 結構化資料": 55,
-    }
-    assert result["geo_score"] == 69
-```
-
-- [ ] **Step 2: Run the test and verify it fails**
-
-Run: `pytest tests/test_scoring.py::TestScoreUrl::test_score_url_uses_dashboard_dimensions -v`
-
-Expected: the returned dimensions still contain Claude's guessed values.
-
-- [ ] **Step 3: Override only authoritative score fields**
-
-After parsing the Claude response, independently run both Dashboard-equivalent modules and replace the shared values:
+Patch the search boundaries with duplicated press releases, independent Tier 1/Tier 2 articles, stale coverage, official social accounts, and third-party PTT/Dcard/Threads mentions. Assert exact-match brand filtering, URL deduplication, recency, source tiering, and that official posts do not count as third-party community evidence.
 
 ```python
-audit = run_geo_audit(url, scores["brand_name"])
-authority = score_brand_authority_ai(scores["brand_name"])
-avg = authority["avg"]
-
-scores.update({
-    "ai_citability": audit["ai_platform"],
-    "content_eeat": audit["content"],
-    "technical": audit["technical"],
-    "schema": audit["schema"],
-    "media_coverage": avg["media"],
-    "content_depth": avg["content"],
-    "social_presence": avg["community"],
-    "entity_recognition": avg["identity"],
-})
+def test_brand_score_uses_one_evidence_set_and_never_model_memory():
+    result = score_brand_authority(TAIWAN_EVIDENCE)
+    assert result.maximums == {
+        "media": 40, "content_depth": 20,
+        "social": 20, "entity": 20,
+    }
+    assert result.score == sum(result.breakdown.values())
+    assert result.source == "taiwan_search"
 ```
 
-Retain Claude's brand name, diagnosis, reason text, and four Scorecard-only platform estimates. `build_score_data()` continues to sum the four brand matrix values and use the existing 25/25/20/20/10 total formula.
+- [ ] **Step 2: Verify tests fail before search/scoring exists**
 
-- [ ] **Step 4: Run the Scorecard tests**
+Run: `pytest tests/test_report_scoring.py -k brand -v`
 
-Run: `pytest tests/test_scoring.py tests/test_app.py tests/test_analysis_card.py -v`
+- [ ] **Step 3: Add Taiwan evidence collection**
 
-Expected: all tests pass.
+Query Google News RSS with `hl=zh-TW&gl=TW`, query configured SerpAPI/byCrawl with `gl=tw&hl=zh-tw`, and search the approved Taiwan media and social domains. Search all detected aliases. Normalize URLs, group syndicated copies, distinguish owned/official domains, and retain title, snippet, source, date, and query provenance.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Add strict 40/20/20/20 scoring**
 
-```bash
-git add scoring.py tests/test_scoring.py
-git commit -m "feat: align scorecard with dashboard scoring"
-```
+Media uses independent article count, tier, recency, and syndicated-content penalties. Content depth uses evidence from external article titles/snippets/pages. Social uses only third-party discussion/engagement evidence. Entity compares brand identity across website, Schema, media, and third-party profiles. Missing search services score only from available evidence and return warnings; they never invoke an LLM fallback.
 
-### Task 4: Verify Moreson independently
+- [ ] **Step 5: Run brand and failure-path tests**
+
+Expected: deterministic results and explicit `data_incomplete` warnings when a source is unavailable.
+
+### Task 4: Integrate Dashboard without changing real AI visibility
 
 **Files:**
-- Create: `tests/test_moreson_parity.py`
-- Modify: `.env.example`
+- Modify: `geo-visibility-dashboard/server.py`
+- Modify: `geo-visibility-dashboard/scorer.py`
+- Test: `geo-visibility-dashboard/tests/test_server_scoring.py`
 
-- [ ] **Step 1: Document required independent credentials**
+- [ ] **Step 1: Write failing integration tests**
 
-Add these names without values to `.env.example`:
+Patch `run_report_audit` and `_run_engine_analysis`. Assert Dashboard uses report values for `ai_platform`, `content`, `technical`, `schema`, and `brand`, while `visibility_score`, engine responses, SOV, and citations remain untouched.
 
-```text
-ANTHROPIC_API_KEY=
-OPENAI_API_KEY=
-GEMINI_API_KEY=
-FIRECRAWL_API_KEY=
-```
+- [ ] **Step 2: Replace only the simplified shared audit**
 
-- [ ] **Step 2: Add a parity harness**
+Call `run_report_audit(url, brand_name, aliases)` once per job and map its five scores into the existing `geo_scores` keys. Remove the three-AI brand total from the scoring path, but leave unrelated report-generation text code intact.
 
-The integration test imports Dashboard `run_geo_audit` from its sibling checkout and Scorecard `run_geo_audit`, runs both against the same URL, and compares all objective fields:
+- [ ] **Step 3: Correct Dashboard weights**
 
-```python
-TARGET_URL = "https://www.moreson.com.tw/moreson/"
+Update `calculate_final_score` to use `20/20/20/16/12/12` for real visibility, platform, content, technical, schema, and brand. Add a test that recomputes the returned total from displayed values.
 
-assert scorecard_result["ai_platform"] == dashboard_result["ai_platform"]
-assert scorecard_result["content"] == dashboard_result["content"]
-assert scorecard_result["technical"] == dashboard_result["technical"]
-assert scorecard_result["schema"] == dashboard_result["schema"]
-```
-
-Mark the test `integration` and skip it unless `FIRECRAWL_API_KEY` is set, so normal Render builds do not spend API quota.
-
-- [ ] **Step 3: Run the live parity test**
-
-Run: `pytest tests/test_moreson_parity.py -v -m integration`
-
-Expected: the four objective dimensions match exactly.
-
-- [ ] **Step 4: Run a complete live Scorecard generation**
-
-Run `score_url("https://www.moreson.com.tw/moreson/")`, generate both PNG files in a temporary directory, and verify both files are non-empty. Record the five scores and weighted total in the command output.
-
-- [ ] **Step 5: Run the complete test suite**
+- [ ] **Step 4: Run Dashboard tests**
 
 Run: `pytest -v`
 
-Expected: all non-integration tests pass; live integration passes when credentials are loaded.
+Expected: report integration passes and existing AI visibility behavior remains green.
 
-- [ ] **Step 6: Commit**
+### Task 5: Integrate Scorecard Web and remove guessed dimension totals
 
-```bash
-git add .env.example tests/test_moreson_parity.py
-git commit -m "test: verify independent Moreson scoring parity"
-```
+**Files:**
+- Modify: `scorecard-web/scoring.py`
+- Modify: `scorecard-web/requirements.txt`
+- Modify: `scorecard-web/tests/test_scoring.py`
+- Delete: `scorecard-web/dashboard_audit.py`
+- Delete: `scorecard-web/tests/test_dashboard_audit.py`
+
+- [ ] **Step 1: Write failing Scorecard orchestration tests**
+
+Assert `score_url()` gets all five dimensions and four visible platform cards from `run_report_audit`, does not ask Claude for dimension scores, and does not call real AI visibility endpoints.
+
+- [ ] **Step 2: Replace the free-form Claude scoring prompt**
+
+Use the report engine for scores and evidence-derived reasons. Preserve brand name, existing response structure, PNG fields, routes, and filenames. Remove the Anthropic runtime dependency if no remaining Scorecard path needs it.
+
+- [ ] **Step 3: Correct Scorecard weights**
+
+Change the total to `/report` order: platform 25%, content 25%, technical 20%, schema 15%, brand 15%. Keep the visual row order unchanged.
+
+- [ ] **Step 4: Run all Scorecard tests and image generation tests**
+
+Run: `pytest -v`
+
+Expected: all endpoint, scoring, scorecard PNG, and analysis PNG tests pass.
+
+### Task 6: Cross-repository parity and live Moreson acceptance
+
+**Files:**
+- Create: `scorecard-web/tests/test_moreson_parity.py`
+- Modify: both `.env.example`/deployment environment documentation as needed
+
+- [ ] **Step 1: Add algorithm-version parity test**
+
+Both modules expose the same `REPORT_SCORING_VERSION`. Load each independently and assert identical version, category maxima, and fixed-fixture outputs.
+
+- [ ] **Step 2: Run the live Moreson audit once in each repository**
+
+Target: `https://www.moreson.com.tw/moreson/`. Capture the five common scores, breakdowns, evidence URLs, warnings, and totals. Assert the five common raw scores are identical.
+
+- [ ] **Step 3: Verify output artifacts**
+
+Generate Dashboard response/PDF and both Scorecard PNGs. Confirm non-empty files and that displayed scores equal API payload scores.
+
+- [ ] **Step 4: Run full QA and review**
+
+Run all tests, inspect secrets/logging, network timeout behavior, SSRF protections, malformed HTML/JSON-LD handling, duplicate search results, and failure fallbacks. Fix every critical or warning finding, then rerun all tests.
+
+### Task 7: Deploy and smoke test both public services
+
+**Files:**
+- Modify deployment files only if required by dependencies or start commands.
+
+- [ ] **Step 1: Commit each repository's tested changes**
+
+Keep Dashboard and Scorecard commits separate. Do not include local `.env`, API logs, temporary cards, or unrelated dirty files.
+
+- [ ] **Step 2: Push and deploy both Render services**
+
+Confirm the required search credentials are configured independently for both services. Do not add a Claude key to Scorecard unless another retained feature requires it.
+
+- [ ] **Step 3: Public smoke tests**
+
+Open both public URLs, run Moreson, verify five shared scores match, verify Dashboard AI visibility still runs, and download all expected artifacts.
+
+- [ ] **Step 4: Record final URLs and evidence**
+
+Return the two working URLs, five Moreson common scores, both final totals, deployment revisions, and verification results.
