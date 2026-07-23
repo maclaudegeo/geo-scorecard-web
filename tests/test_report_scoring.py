@@ -38,6 +38,22 @@ def test_schema_flattens_graph_and_flags_invalid_values():
     assert "placeholder_value:address" in evidence.issues
 
 
+def test_schema_scores_nodes_with_multiple_types():
+    schema = parse_schema_blocks([
+        {
+            "@type": ["Organization", "WebSite"],
+            "name": "MicroAd Taiwan",
+            "url": "https://microad.tw/",
+            "potentialAction": {"@type": "SearchAction"},
+        }
+    ])
+
+    result = score_schema(schema)
+
+    assert result.breakdown["organization_person"]["points"] == 15
+    assert result.breakdown["website_searchaction"]["points"] == 5
+
+
 def test_schema_rubric_does_not_treat_invalid_localbusiness_as_valid():
     schema = parse_schema_blocks([
         {"@type": "localBusiness", "address": "暫無", "sameAs": ["https://example.com"]},
@@ -156,6 +172,21 @@ def test_brand_detection_extracts_domain_brand_from_long_marketing_title():
     )
 
     assert _detect_brand(page, "tw.iherb.com") == "iHerb"
+
+
+def test_brand_detection_reads_organization_with_multiple_types():
+    page = PageEvidence(
+        url="https://microad.tw/",
+        status_code=200,
+        title="",
+        text="",
+        raw_html="",
+        schema=parse_schema_blocks([
+            {"@type": ["Organization", "Corporation"], "name": "MicroAd Taiwan"}
+        ]),
+    )
+
+    assert _detect_brand(page, "microad.tw") == "MicroAd Taiwan"
 
 
 def test_snapshot_keeps_unknown_network_signals_unknown():

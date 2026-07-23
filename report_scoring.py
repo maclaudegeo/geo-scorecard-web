@@ -19,7 +19,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import requests
 
 
-REPORT_SCORING_VERSION = "2026-07-23.1"
+REPORT_SCORING_VERSION = "2026-07-23.2"
 USER_AGENT = "Mozilla/5.0 (compatible; GEO-Report-Audit/2.0; +https://microad.tw/)"
 REQUEST_HEADERS = {
     "User-Agent": USER_AGENT,
@@ -347,6 +347,15 @@ def _flatten_schema(value: Any) -> Iterable[Dict[str, Any]]:
         node = {k: v for k, v in value.items() if k != "@graph"}
         if node.get("@type"):
             yield node
+
+
+def _node_schema_types(node: Dict[str, Any]) -> Tuple[str, ...]:
+    raw_types = node.get("@type", ())
+    if isinstance(raw_types, str):
+        return (raw_types,)
+    if isinstance(raw_types, (list, tuple, set)):
+        return tuple(item for item in raw_types if isinstance(item, str))
+    return ()
 
 
 def _placeholder_issues(value: Any, path: str = "") -> Iterable[str]:
@@ -812,8 +821,8 @@ def _detect_brand(home: Optional[PageEvidence], hostname: str) -> str:
     domain_brand = _hostname_brand(hostname)
     if home:
         for node in home.schema.nodes:
-            schema_type = str(node.get("@type", "")).lower()
-            if schema_type in {"organization", "corporation", "localbusiness", "website"} and _valid_value(node.get("name")):
+            schema_types = {item.lower() for item in _node_schema_types(node)}
+            if schema_types.intersection({"organization", "corporation", "localbusiness", "website"}) and _valid_value(node.get("name")):
                 return _clean_brand_name(str(node["name"]))
         title = _clean_brand_name(home.title)
         blocked_title = re.search(
@@ -840,7 +849,7 @@ def score_schema(schema: SchemaEvidence) -> ScoreResult:
     types = set(schema.types)
     valid_types = {item for item in types if item in VALID_SCHEMA_TYPES}
     invalid = bool(schema.issues)
-    org_nodes = [node for node in schema.nodes if node.get("@type") in {"Organization", "Person", "Corporation"}]
+    org_nodes = [node for node in schema.nodes if set(_node_schema_types(node)).intersection({"Organization", "Person", "Corporation"})]
     org_complete = any(_valid_value(node.get("name")) and _valid_value(node.get("url")) for node in org_nodes)
     org_basic = any(_valid_value(node.get("name")) for node in org_nodes)
     same_as = []
@@ -862,11 +871,11 @@ def score_schema(schema: SchemaEvidence) -> ScoreResult:
             and _host(value) not in owned_hosts
             and any(_host(value) == domain or _host(value).endswith("." + domain) for domain in identity_hosts)
         )
-    articles = [node for node in schema.nodes if node.get("@type") in ARTICLE_SCHEMA_TYPES]
+    articles = [node for node in schema.nodes if set(_node_schema_types(node)).intersection(ARTICLE_SCHEMA_TYPES)]
     article_author = any(_valid_value(node.get("author")) for node in articles)
-    business_nodes = [node for node in schema.nodes if node.get("@type") in BUSINESS_SCHEMA_TYPES]
+    business_nodes = [node for node in schema.nodes if set(_node_schema_types(node)).intersection(BUSINESS_SCHEMA_TYPES)]
     business_complete = any(_valid_value(node.get("name")) and any(_valid_value(node.get(key)) for key in ("address", "offers", "provider", "description")) for node in business_nodes)
-    website_action = any(node.get("@type") == "WebSite" and "SearchAction" in str(node.get("potentialAction", "")) for node in schema.nodes)
+    website_action = any("WebSite" in _node_schema_types(node) and "SearchAction" in str(node.get("potentialAction", "")) for node in schema.nodes)
     has_breadcrumb = "BreadcrumbList" in valid_types
     has_speakable = any(_valid_value(node.get("speakable")) for node in articles)
     has_knows = any(isinstance(node.get("knowsAbout"), list) and len(node["knowsAbout"]) >= 3 for node in org_nodes)
