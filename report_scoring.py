@@ -19,7 +19,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import requests
 
 
-REPORT_SCORING_VERSION = "2026-07-22.2"
+REPORT_SCORING_VERSION = "2026-07-23.1"
 USER_AGENT = "Mozilla/5.0 (compatible; GEO-Report-Audit/2.0; +https://microad.tw/)"
 REQUEST_HEADERS = {
     "User-Agent": USER_AGENT,
@@ -797,15 +797,35 @@ def collect_report_snapshot(url: str, brand_name: str = "", aliases: Sequence[st
     )
 
 
+def _hostname_brand(hostname: str) -> str:
+    host = hostname.lower().split(":", 1)[0].removeprefix("www.")
+    labels = [label for label in host.split(".") if label]
+    if not labels:
+        return ""
+    if len(labels) >= 3 and labels[-1] in {"tw", "hk", "cn", "jp", "uk", "au", "nz", "sg"} \
+            and labels[-2] in {"com", "co", "org", "net"}:
+        return labels[-3]
+    return labels[-2] if len(labels) >= 2 else labels[0]
+
+
 def _detect_brand(home: Optional[PageEvidence], hostname: str) -> str:
+    domain_brand = _hostname_brand(hostname)
     if home:
         for node in home.schema.nodes:
             schema_type = str(node.get("@type", "")).lower()
             if schema_type in {"organization", "corporation", "localbusiness", "website"} and _valid_value(node.get("name")):
                 return _clean_brand_name(str(node["name"]))
-        if home.title:
-            return _clean_brand_name(home.title)
-    return hostname.lower().removeprefix("www.").split(".")[0].title()
+        title = _clean_brand_name(home.title)
+        blocked_title = re.search(
+            r"just a moment|attention required|access denied|forbidden|security verification|"
+            r"checking your browser|robot or human|請稍候|存取被拒",
+            f"{title} {home.text[:300]}",
+            re.I,
+        )
+        if title and not blocked_title:
+            domain_match = re.search(re.escape(domain_brand), title, re.I) if domain_brand else None
+            return domain_match.group(0) if domain_match else title
+    return domain_brand
 
 
 def _clean_brand_name(value: str) -> str:

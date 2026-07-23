@@ -16,6 +16,7 @@ from report_scoring import (
     score_schema,
     score_technical,
     validate_public_url,
+    _detect_brand,
 )
 
 
@@ -131,6 +132,30 @@ def test_brand_content_depth_requires_site_content_not_media_headlines():
     )
 
     assert score_brand_authority(evidence, snapshot).breakdown["content_depth"] > 0
+
+
+def test_brand_detection_ignores_antibot_page_title_and_uses_domain():
+    page = PageEvidence(
+        url="https://tw.iherb.com/",
+        status_code=403,
+        title="Just a moment...",
+        text="Performing security verification",
+        raw_html="<title>Just a moment...</title>",
+    )
+
+    assert _detect_brand(page, "tw.iherb.com") == "iherb"
+
+
+def test_brand_detection_extracts_domain_brand_from_long_marketing_title():
+    page = PageEvidence(
+        url="https://tw.iherb.com/",
+        status_code=200,
+        title="iHerb 台灣官方網站｜保健食品與天然產品線上購物",
+        text="iHerb 提供健康養生商品。",
+        raw_html="<title>iHerb 台灣官方網站</title>",
+    )
+
+    assert _detect_brand(page, "tw.iherb.com") == "iHerb"
 
 
 def test_snapshot_keeps_unknown_network_signals_unknown():
