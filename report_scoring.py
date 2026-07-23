@@ -19,7 +19,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import requests
 
 
-REPORT_SCORING_VERSION = "2026-07-23.2"
+REPORT_SCORING_VERSION = "2026-07-23.5"
 USER_AGENT = "Mozilla/5.0 (compatible; GEO-Report-Audit/2.0; +https://microad.tw/)"
 REQUEST_HEADERS = {
     "User-Agent": USER_AGENT,
@@ -47,7 +47,9 @@ MEDIA_TIERS = {
     "cw.com.tw": 2, "businessweekly.com.tw": 2,
     "vogue.com.tw": 3, "elle.com.tw": 3, "popdaily.com.tw": 3, "gq.com.tw": 3,
     "ettoday.net": 4, "ltn.com.tw": 4, "chinatimes.com": 4,
-    "tw.news.yahoo.com": 4, "inside.com.tw": 5, "blog.104.com.tw": 5,
+    "tw.news.yahoo.com": 4, "tw.stock.yahoo.com": 4,
+    "inside.com.tw": 5, "blog.104.com.tw": 5,
+    "adm.com.tw": 5, "dma.org.tw": 5,
 }
 SOURCE_TIERS = {
     "中央社": 1, "聯合新聞網": 1, "聯合報": 1,
@@ -55,6 +57,7 @@ SOURCE_TIERS = {
     "天下雜誌": 2, "商業周刊": 2, "VOGUE": 3, "ELLE": 3,
     "POPDAILY": 3, "GQ": 3, "ETTODAY": 4, "自由時報": 4,
     "中時新聞網": 4, "YAHOO奇摩新聞": 4, "INSIDE": 5, "104職場力": 5,
+    "廣告雜誌": 5, "台灣數位媒體應用暨行銷協會": 5,
 }
 SOCIAL_DOMAINS = {
     "ptt.cc": "PTT", "dcard.tw": "Dcard", "threads.net": "Threads",
@@ -533,13 +536,20 @@ def _source_tier(hit: SearchHit) -> int:
     path = urllib.parse.urlsplit(hit.url).path.lower()
     if host == "info.technews.tw" or "/search" in path or "/postwrite/" in path:
         return 6
-    if host in MEDIA_TIERS:
-        return MEDIA_TIERS[host]
+    domain = next((item for item in MEDIA_TIERS if host == item or host.endswith("." + item)), None)
+    if domain:
+        return MEDIA_TIERS[domain]
     source = hit.source.upper().replace(" ", "")
     for name, tier in SOURCE_TIERS.items():
         if name.upper().replace(" ", "") in source:
             return tier
     return 6
+
+
+def _is_media_article(hit: SearchHit) -> bool:
+    host = _host(hit.url)
+    path = urllib.parse.urlsplit(hit.url).path.lower()
+    return host != "info.technews.tw" and "/search" not in path
 
 
 def _parse_published(value: str) -> Optional[date]:
@@ -567,7 +577,8 @@ def _dedupe_hits(hits: Sequence[SearchHit]) -> List[SearchHit]:
     result: List[SearchHit] = []
     seen = set()
     for hit in hits:
-        title_key = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", hit.title.lower())
+        base_title = re.split(r"\s*[|｜]\s*|-\s+", hit.title, maxsplit=1)[0]
+        title_key = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", base_title.lower())
         url_key = _normalize_url(hit.url)
         key = (url_key, title_key)
         if key in seen or any(title_key and title_key == item[1] for item in seen):
@@ -630,23 +641,45 @@ def _results_to_hits(results: Sequence[Dict[str, Any]], category: str, brand: st
     return hits
 
 
-def _entity_tokens(brand_name: str) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
-    chinese = tuple(dict.fromkeys(re.findall(r"[\u4e00-\u9fff]{2,}", brand_name)))
-    latin = tuple(dict.fromkeys(token.lower() for token in re.findall(r"[A-Za-z0-9]{3,}", brand_name)))
-    return chinese, latin
+def _schema_brand_aliases(schema: SchemaEvidence, brand_name: str) -> Tuple[str, ...]:
+    aliases: List[str] = []
+    identity_types = {"Organization", "Corporation", "LocalBusiness", "ProfessionalService", "WebSite"}
+    for node in schema.nodes:
+        if not set(_node_schema_types(node)).intersection(identity_types):
+            continue
+        for key in ("name", "alternateName"):
+            values = node.get(key, ())
+            if isinstance(values, str):
+                values = (values,)
+            if isinstance(values, (list, tuple, set)):
+                aliases.extend(_clean_brand_name(item) for item in values if isinstance(item, str) and item.strip())
+    canonical = brand_name.casefold()
+    result: List[str] = []
+    seen = {canonical}
+    for alias in aliases:
+        key = alias.casefold()
+        if key not in seen:
+            seen.add(key)
+            result.append(alias)
+    return tuple(result)
 
 
-def _filter_entity_hits(hits: Sequence[SearchHit], brand_name: str) -> List[SearchHit]:
-    chinese, latin = _entity_tokens(brand_name)
+def _filter_entity_hits(
+    hits: Sequence[SearchHit],
+    brand_name: str,
+    aliases: Sequence[str] = (),
+) -> List[SearchHit]:
+    entity_names = tuple(dict.fromkeys([brand_name, *aliases]))
+    normalized_names = [
+        re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", name.casefold())
+        for name in entity_names
+        if name.strip()
+    ]
     filtered = []
     for hit in hits:
         text = f"{hit.title} {hit.snippet} {hit.source}"
-        lower = text.lower()
-        if chinese:
-            matches = any(token in text for token in chinese)
-        else:
-            matches = any(token in lower for token in latin)
-        if matches:
+        normalized_text = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", text.casefold())
+        if any(name and name in normalized_text for name in normalized_names):
             filtered.append(hit)
     return filtered
 
@@ -713,8 +746,8 @@ def collect_brand_evidence(
         social.extend(api_social)
         warnings.extend(api_warnings)
 
-    media = _filter_entity_hits(media, brand_name)
-    social = _filter_entity_hits(social, brand_name)
+    media = [hit for hit in _filter_entity_hits(media, brand_name, aliases) if _is_media_article(hit)]
+    social = _filter_entity_hits(social, brand_name, aliases)
     owned_roots = {
         (_host(hit.url), urllib.parse.urlsplit(hit.url).path.strip("/").split("/")[0])
         for hit in social
@@ -786,9 +819,12 @@ def collect_report_snapshot(url: str, brand_name: str = "", aliases: Sequence[st
         and supplied_brand.lower() in f"{home.title} {home.text[:5000]}".lower()
     )
     detected_brand = supplied_brand if supplied_matches else page_brand
+    combined_schema = parse_schema_blocks([node for page in pages for node in page.schema.nodes])
     page_text = f"{home.title} {home.text[:10000]}".lower() if home else ""
     verified_aliases = [alias for alias in aliases if alias.strip() and alias.lower() in page_text]
-    combined_schema = parse_schema_blocks([node for page in pages for node in page.schema.nodes])
+    identity_schema = home.schema if home else combined_schema
+    verified_aliases.extend(_schema_brand_aliases(identity_schema, detected_brand))
+    verified_aliases = list(dict.fromkeys(verified_aliases))
     brand = collect_brand_evidence(detected_brand, verified_aliases, (_host(origin),), combined_schema)
     warnings.extend(brand.warnings)
     return ReportSnapshot(
@@ -909,7 +945,7 @@ def score_brand_authority(
     evidence: BrandEvidence,
     snapshot: Optional[ReportSnapshot] = None,
 ) -> BrandScoreResult:
-    media = _dedupe_hits(evidence.media_hits)
+    media = _dedupe_hits([hit for hit in evidence.media_hits if _is_media_article(hit)])
     social = _dedupe_hits(evidence.social_hits)
     today = datetime.now(timezone.utc).date()
     tier_points = {1: 10, 2: 8, 3: 6, 4: 4, 5: 3, 6: 2}

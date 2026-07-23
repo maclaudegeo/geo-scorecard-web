@@ -1,6 +1,7 @@
 from unittest.mock import Mock, patch
 
 import pytest
+import report_scoring
 
 from report_scoring import (
     BrandEvidence,
@@ -17,6 +18,7 @@ from report_scoring import (
     score_technical,
     validate_public_url,
     _detect_brand,
+    _filter_entity_hits,
 )
 
 
@@ -128,6 +130,59 @@ def test_taiwan_brand_authority_deduplicates_and_ignores_owned_social():
     assert result.score == sum(result.breakdown.values())
 
 
+def test_brand_authority_supports_industry_media_and_media_subdomains():
+    evidence = BrandEvidence(
+        brand_name="MicroAd Taiwan",
+        media_hits=(
+            SearchHit("台灣微告產業專訪", "https://adm.com.tw/article/123"),
+            SearchHit("台灣微告市場觀察", "https://meet.bnext.com.tw/articles/456"),
+        ),
+    )
+
+    result = score_brand_authority(evidence)
+
+    assert result.breakdown["media"] == 11
+    assert result.evidence_counts["media"] == 2
+
+
+def test_brand_authority_excludes_company_registry_and_search_pages():
+    evidence = BrandEvidence(
+        brand_name="MicroAd Taiwan",
+        media_hits=(
+            SearchHit("台灣微告股份有限公司", "https://info.technews.tw/company/24320518"),
+            SearchHit("公司登記查詢系統", "https://info.technews.tw/searchName?keyword=microad"),
+        ),
+    )
+
+    result = score_brand_authority(evidence)
+
+    assert result.breakdown["media"] == 0
+    assert result.evidence_counts["media"] == 0
+
+
+def test_brand_authority_deduplicates_google_news_and_original_article_titles():
+    evidence = BrandEvidence(
+        brand_name="MicroAd Taiwan",
+        media_hits=(
+            SearchHit(
+                "台灣微告推出 GEO Solution 助品牌搶攻 AI 回答曝光率",
+                "https://money.udn.com/money/story/11799/9448237",
+                source="經濟日報",
+            ),
+            SearchHit(
+                "台灣微告推出 GEO Solution 助品牌搶攻 AI 回答曝光率 | 產業動態 | 商情 - 經濟日報",
+                "https://news.google.com/rss/articles/example",
+                source="經濟日報",
+            ),
+        ),
+    )
+
+    result = score_brand_authority(evidence)
+
+    assert result.evidence_counts["media"] == 1
+    assert result.breakdown["media"] == 10
+
+
 def test_brand_content_depth_requires_site_content_not_media_headlines():
     page = PageEvidence(
         url="https://example.com/case-study",
@@ -187,6 +242,36 @@ def test_brand_detection_reads_organization_with_multiple_types():
     )
 
     assert _detect_brand(page, "microad.tw") == "MicroAd Taiwan"
+
+
+def test_schema_brand_aliases_include_organization_alternate_names():
+    schema = parse_schema_blocks([
+        {
+            "@type": ["Organization", "LocalBusiness"],
+            "name": "台灣微告股份有限公司",
+            "alternateName": ["MicroAd Taiwan", "台灣微告", "MicroAd"],
+        },
+        {"@type": "WebSite", "name": "MicroAd Taiwan"},
+    ])
+
+    assert report_scoring._schema_brand_aliases(schema, "台灣微告股份有限公司") == (
+        "MicroAd Taiwan",
+        "台灣微告",
+        "MicroAd",
+    )
+
+
+def test_media_entity_filter_accepts_verified_brand_aliases():
+    hits = (
+        SearchHit("台灣微告在台 11 週年", "https://adm.com.tw/article/123"),
+        SearchHit("MicroAd Taiwan 跨境行銷布局", "https://dma.org.tw/news/456"),
+    )
+
+    assert _filter_entity_hits(
+        hits,
+        "台灣微告股份有限公司",
+        ("MicroAd Taiwan", "台灣微告", "MicroAd"),
+    ) == list(hits)
 
 
 def test_snapshot_keeps_unknown_network_signals_unknown():
